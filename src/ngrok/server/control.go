@@ -10,6 +10,9 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+	"os"
+	"bufio"
+	"path/filepath"
 )
 
 const (
@@ -101,6 +104,12 @@ func NewControl(ctlConn conn.Conn, authMsg *msg.Auth) {
 		return
 	}
 
+	auth, err, domain := c.CheckAuth(c.auth.User)
+	if auth != true || domain == "" {
+		failAuth(fmt.Errorf("Auth failed || %s", err))
+		return
+	}
+
 	// register the control
 	if replaced := controlRegistry.Add(c.id, c); replaced != nil {
 		replaced.shutdown.WaitComplete()
@@ -125,11 +134,58 @@ func NewControl(ctlConn conn.Conn, authMsg *msg.Auth) {
 	go c.stopper()
 }
 
+func (c *Control) CheckAuth(token string) (bool, error, string) {
+	if token == "" {
+		return false, nil, "";
+	}
+
+	filename := "auth.txt"
+	execDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	filename = filepath.Join(execDir, filename)
+
+	f, err := os.Open(filename)
+	if err != nil {
+		return false, err, ""
+	}
+	buf := bufio.NewReader(f)
+	for {
+		line, err := buf.ReadString('\n')
+		line = strings.TrimSpace(line)
+
+		if err != nil {
+			if err == io.EOF {
+				return false, fmt.Errorf("Token Invalid"), ""
+			}
+			return false, err, ""
+		}
+
+		config := strings.Split(line, "|")
+		if len(config) != 2 {
+			continue
+		}
+
+		subDomain := config[0]
+		authToken := config[1]
+
+		if authToken == token {
+			return true, nil, subDomain
+		}
+	}
+	return false, nil, ""
+}
+
 // Register a new tunnel on this control connection
 func (c *Control) registerTunnel(rawTunnelReq *msg.ReqTunnel) {
 	for _, proto := range strings.Split(rawTunnelReq.Protocol, "+") {
 		tunnelReq := *rawTunnelReq
 		tunnelReq.Protocol = proto
+
+		auth, err, domain := c.CheckAuth(c.auth.User)
+		if auth != true || domain == "" {
+			c.shutdown.Begin()
+			return
+		}
+		tunnelReq.Subdomain = domain
 
 		c.conn.Debug("Registering new tunnel")
 		t, err := NewTunnel(&tunnelReq, c)
